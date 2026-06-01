@@ -253,15 +253,15 @@ else
 fi
 
 log "Phase 11.5: install tawon-pod-injector webhook (hostNetwork + hostAliases injection)"
-TPI_DIR="${TPI_DIR:-${HOME}/tawon-pod-injector}"
+TPI_DIR="${TPI_DIR:-${BUNDLE_DIR}/tawon-pod-injector}"
 if [[ -d "$TPI_DIR" ]]; then
-  log "  found $TPI_DIR — see its README for the build + deploy commands"
+  log "  found $TPI_DIR — see its README for build + deploy commands"
   log "  (this script does NOT invoke it automatically since it requires"
   log "  podman build + cert gen + envsubst; do it once manually per site)"
 else
-  log "  $TPI_DIR not found — clone mimetrix/tawon-pod-injector and follow"
-  log "  RUNBOOK.md Phase 4. Without this, agent pods will hit the Vega CNI"
-  log "  block AND publish 'not connected' against stale operator hostAliases."
+  log "  $TPI_DIR not found — expected at \$BUNDLE_DIR/tawon-pod-injector."
+  log "  Without this, agent pods hit the Vega CNI block AND publish"
+  log "  'not connected' against stale operator hostAliases. See RUNBOOK.md."
 fi
 
 echo
