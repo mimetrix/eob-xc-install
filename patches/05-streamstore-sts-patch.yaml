@@ -1,0 +1,23 @@
+# Strategic-merge patch for the auto-created StreamStore StatefulSet.
+# Apply with: kubectl -n tawon-operator patch sts tawon-streamstore --patch-file patches/05-streamstore-sts-patch.yaml
+#
+# - hostNetwork: Vega CNI bypass
+# - master-0 pin: matches the hostpath PV location AND the only node with the NATS image cached
+# - imagePullPolicy IfNotPresent: see notes in 01-operator-deploy.yaml
+#
+# IMPORTANT: even after this patch, the sts.spec.template.spec.containers[0].image will
+# still be the stale digest reference from the chart (the operator regenerates the sts on
+# CR reconcile and re-imports the chart default). Override with:
+#   kubectl -n tawon-operator set image sts/tawon-streamstore \
+#     tawon-streamstore-d2f18e=quay.io/mantisnet/nats:2.10.4-alpine
+# (See README step 5.)
+spec:
+  template:
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: master-0
+      containers:
+        - name: tawon-streamstore-d2f18e
+          imagePullPolicy: IfNotPresent

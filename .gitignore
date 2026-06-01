@@ -1,0 +1,15 @@
+# Generated TLS material (the webhook install script mints these on the fly).
+*.crt
+*.key
+*.pem
+*.csr
+
+# Local-only state.
+*.bak.*
+*.log
+*.tmp
+
+# Editors / OS.
+.DS_Store
+.idea/
+.vscode/

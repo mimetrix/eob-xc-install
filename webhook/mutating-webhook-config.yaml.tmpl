@@ -1,0 +1,31 @@
+# MutatingWebhookConfiguration for the EoB pod webhook.
+# Substitute __HOST_IP__, __PORT__ and __CA_B64__ before applying.
+# The install.sh in this directory does the substitution and kubectl apply.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: eob-mutate
+webhooks:
+  - name: eob-mutate.f5.local
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    reinvocationPolicy: Never
+    clientConfig:
+      # URL form (not Service form) because the webhook server runs as a systemd
+      # service on the master-0 host, not as a k8s pod.
+      url: https://__HOST_IP__:__PORT__/mutate
+      caBundle: __CA_B64__
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: tawon-operator
+    objectSelector:
+      matchLabels:
+        app.kubernetes.io/name: tawon-directive

@@ -1,0 +1,20 @@
+# Helm values override for tawon-operator chart on F5 XC CE sites.
+# Pass with: ./install.sh --chart-version 3.0.0-rc4 -f values-override.yaml --namespace operators
+
+controllerManager:
+  kubeRbacProxy:
+    # Remap off 8443 because voucherd already owns that port on every XC node.
+    args:
+      - --secure-listen-address=0.0.0.0:18443
+      - --upstream=http://127.0.0.1:8080/
+      - --logtostderr=true
+      - --v=0
+  manager:
+    env:
+      # Chart default for jetstream image is a stale sha256 digest that doesn't
+      # match the NATS image shipped in the release-package tarball. Use the tag.
+      tawonOperatorDefaultJetstreamImage: quay.io/mantisnet/nats:2.10.4-alpine
+      # Pull-policy applied to dashboard pods spawned by the operator.
+      # IfNotPresent uses the locally-loaded image; Always tries to refresh from
+      # quay, which 503s through the docker proxy on this site.
+      tawonOperatorDefaultDashboardImagePullPolicy: IfNotPresent

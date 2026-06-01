@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: eob-node-fix-NODENAME
+  namespace: tawon-operator
+  labels:
+    app: eob-node-fix
+spec:
+  hostNetwork: true
+  hostPID: true
+  dnsPolicy: ClusterFirstWithHostNet
+  nodeName: NODENAME
+  restartPolicy: Never
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: fix
+      image: gcr.download.volterra.us/volterraio/coredns@sha256:ae15f69b4814303432d16c6bb66ffdbc7b487a41d4e2523905cf1637f4768253
+      imagePullPolicy: IfNotPresent
+      command:
+        - chroot
+        - /host
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          mkdir -p /etc/containers/registries.conf.d
+          cat > /etc/containers/registries.conf.d/099-eob-mirror.conf <<'EOF'
+          # EoB image mirror — master-0 hosts the in-cluster registry.
+          # Cri-o consults the mirror first; falls back to the upstream location on miss.
+          # Sibling file: /etc/containers/registries.conf (RHEL defaults — leave untouched).
+
+          [[registry]]
+          prefix = "quay.io/mantisnet"
+          location = "quay.io/mantisnet"
+
+          [[registry.mirror]]
+          location = "172.31.44.247:5000/mantisnet"
+          insecure = true
+          EOF
+          echo "=== conf written"
+          ls -la /etc/containers/registries.conf.d/099-eob-mirror.conf
+          cat /etc/containers/registries.conf.d/099-eob-mirror.conf
+          echo "=== restart crio"
+          systemctl restart crio
+          sleep 2
+          systemctl is-active crio
+          echo "=== pull test through mirror"
+          crictl pull quay.io/mantisnet/tawon-operator:v3.0.0-rc4
+          echo "=== resulting cache state"
+          crictl images | grep -E "REPOSITORY|tawon-operator" | head -5
+          echo "=== done"
+      securityContext:
+        privileged: true
+        runAsUser: 0
+        runAsGroup: 0
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+  volumes:
+    - name: host-root
+      hostPath:
+        path: /
+        type: Directory

@@ -1,0 +1,16 @@
+# Merge patch for the auto-created Dashboard CR.
+# Apply with: kubectl apply -f patches/02-dashboard-cr.yaml
+#
+# Reason: the chart's default Dashboard spec enables an OAuth proxy sidecar that pulls
+# quay.io/openshift/origin-oauth-proxy — an image not shipped in the EoB release package
+# and not pullable through the XC site's image proxy. Disabling oauth removes that
+# dependency. (The dashboard backend itself has no built-in auth, so plan for SSO at the
+# ingress layer if external access is opened up.)
+apiVersion: tawon.mantisnet.com/v1alpha1
+kind: Dashboard
+metadata:
+  name: tawon-dashboard
+  namespace: tawon-operator
+spec:
+  oauth:
+    enabled: false

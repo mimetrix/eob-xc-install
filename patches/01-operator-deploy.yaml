@@ -1,0 +1,62 @@
+# Strategic-merge patch for the operator Deployment.
+# Apply with: kubectl apply -f patches/01-operator-deploy.yaml
+#
+# Reasons:
+# - hostNetwork: true / dnsPolicy: ClusterFirstWithHostNet — Vega CNI doesn't allocate
+#   networking for the `operators` namespace; hostNetwork bypasses it.
+# - nodeSelector master-0 — until images are loaded on master-1/2, we pin everything to master-0.
+# - manager.imagePullPolicy: IfNotPresent — chart sets Always via install.sh; that would force
+#   a pull from quay which 503s through the docker proxy. The image is locally cached.
+# - kube-rbac-proxy.containerPort: 18443 — the chart declares containerPort 8443.
+#   Under hostNetwork the scheduler treats containerPort as hostPort; 8443 is owned by voucherd.
+#   We also remapped the listen address to 18443 in values-override.yaml.
+# - manager --health-probe-bind-address=:8181 + probes on :8181 — the agent DaemonSet
+#   the operator spawns binds :8081 (probes) and :9990 (metrics) on hostNetwork. The
+#   chart default puts the operator's manager on :8081 too, so it owns the port and
+#   the agent's probes never start, kubelet kills the container, restart loop. Move
+#   operator probes to :8181 so the agent can have :8081.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tawon-operator-controller-manager
+  namespace: operators
+spec:
+  template:
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: master-0
+      containers:
+        - name: kube-rbac-proxy
+          ports:
+            - containerPort: 18443
+              name: https
+              protocol: TCP
+        - name: manager
+          imagePullPolicy: IfNotPresent
+          args:
+            - --health-probe-bind-address=:8181
+            - --metrics-bind-address=127.0.0.1:8080
+            - --licensing-enabled=true
+            - --leader-elect
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8181
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            successThreshold: 1
+            failureThreshold: 3
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8181
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+            timeoutSeconds: 1

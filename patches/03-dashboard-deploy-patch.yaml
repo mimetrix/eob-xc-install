@@ -1,0 +1,22 @@
+# Strategic-merge patch for the auto-created Dashboard Deployment.
+# Apply with: kubectl -n tawon-operator patch deploy tawon-dashboard --patch-file patches/03-dashboard-deploy-patch.yaml
+#
+# The Dashboard CR doesn't expose hostNetwork (the operator's CR-spec.pod.nodeSelector
+# field also didn't reach the Deployment in our testing), so we patch the Deployment.
+# The operator does NOT reconcile these fields back, empirically — but if a future rc does,
+# you may need to re-apply after operator restarts.
+spec:
+  template:
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: master-0
+      containers:
+        - name: tawon-dashboard
+          imagePullPolicy: IfNotPresent
+# hostAliases for the dashboard's NATS/JetStream client are applied separately
+# in install.sh after the StreamStore Service is created (NATS ClusterIP is
+# runtime-discovered). Without it, the packet viewer fails with
+# "load nats jetstream stream: create consumer: context deadline exceeded" —
+# the dashboard hardcodes .cluster.local just like the operator's StreamReconciler.

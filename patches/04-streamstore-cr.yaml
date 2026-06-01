@@ -1,0 +1,21 @@
+# Merge patch for the auto-created StreamStore CR.
+# Apply with: kubectl apply -f patches/04-streamstore-cr.yaml
+#
+# Reason: chart default storageClassName is unset → falls through to cluster default
+# `standard` (AWS EBS provisioner), which doesn't dynamically provision PVs for app
+# namespaces on this XC site. Switch to `hostpath`, which is node-local. Note that this
+# pins the StatefulSet to whichever node the PV ends up on, which is fine because the
+# StreamStore is also constrained to master-0 by the StatefulSet patch (05).
+#
+# NOTE: After applying this patch, you MUST delete the existing PVC for the new
+# storageClassName to take effect. PVCs from a StatefulSet volumeClaimTemplate are NOT
+# recreated when the template changes. See README step 5.
+apiVersion: tawon.mantisnet.com/v1alpha1
+kind: StreamStore
+metadata:
+  name: tawon-streamstore
+  namespace: tawon-operator
+spec:
+  volumeClaimTemplate:
+    spec:
+      storageClassName: hostpath

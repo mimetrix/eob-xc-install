@@ -1,0 +1,22 @@
+[Unit]
+Description=EoB pod mutating admission webhook (host-side)
+After=network-online.target crio.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/eob-mutate/env
+ExecStart=/usr/bin/python3 /usr/local/bin/eob-mutate.py
+Restart=on-failure
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+# Lock down a bit
+ProtectSystem=strict
+ReadOnlyPaths=/etc/eob-mutate
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
