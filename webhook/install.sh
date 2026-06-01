@@ -41,9 +41,18 @@ if [[ -z "$STREAMSTORE_SVC" ]]; then
     grep -E 'tawon-streamstore-[a-f0-9]+$' | head -1 | sed 's|service/||')
 fi
 [[ -n "$STREAMSTORE_SVC" ]] || { echo "ERROR: NATS svc (tawon-streamstore-*) not found — run the core install first" >&2; exit 1; }
-NATS_IP=$(kubectl -n tawon-operator get svc "$STREAMSTORE_SVC" -o jsonpath='{.spec.clusterIP}')
+# Prefer the streamstore Pod's hostIP over the Service ClusterIP. The Service IP
+# goes stale on chart re-install (the operator never updates this webhook with
+# the new value), and cross-node Service routing is broken on XC sites anyway.
+# As long as the streamstore StatefulSet stays pinned to master-0 via patches/05,
+# the Pod hostIP is stable across the operator's life.
+NATS_IP=$(kubectl -n tawon-operator get pod tawon-streamstore-0 -o jsonpath='{.status.hostIP}' 2>/dev/null)
+if [[ -z "$NATS_IP" ]]; then
+  log "  streamstore pod not ready yet; falling back to Service ClusterIP (may go stale)"
+  NATS_IP=$(kubectl -n tawon-operator get svc "$STREAMSTORE_SVC" -o jsonpath='{.spec.clusterIP}')
+fi
 STREAMSTORE_FQDN="${STREAMSTORE_SVC}.tawon-operator.svc.cluster.local"
-log "NATS svc: $STREAMSTORE_SVC ClusterIP=$NATS_IP"
+log "NATS endpoint (streamstore pod hostIP): $NATS_IP"
 log "hostAliases FQDN: $STREAMSTORE_FQDN"
 
 # 3) Generate self-signed TLS cert.

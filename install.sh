@@ -231,37 +231,20 @@ log "Waiting up to 120s for dashboard pod Ready"
 kubectl -n tawon-operator wait --for=condition=Ready pod \
   -l app.kubernetes.io/name=tawon-dashboard --timeout=120s || true
 
-# 11. Mutating admission webhooks. TWO webhooks live alongside this install,
-# each owns a different concern; both must run for the EoB stack to be usable:
+# 11. Install the mutating admission webhook (eob-mutate). This handles
+# THREE concerns on every Tawon-spawned pod at admission:
+#   - hostNetwork: true + dnsPolicy: ClusterFirstWithHostNet (Vega CNI bypass)
+#   - hostAliases mapping the streamstore FQDN + "nats" to the streamstore Pod's hostIP
+#   - per-directive probe + metrics hostPorts (so multiple directives can coexist)
 #
-#   webhook/                 (eob-mutate, Python) — per-directive port remap
-#                            so multiple ClusterDirectives can coexist on
-#                            the same hostNetwork node.
-#
-#   tawon-pod-injector/      (Go, sibling repo at mimetrix/tawon-pod-injector)
-#                            — injects hostNetwork=true and corrects the
-#                            operator-stamped stale-IP hostAliases on every
-#                            Tawon-managed pod at admission.
-#
-# Without #1, multi-directive setups collide. Without #2, agent pods can't
-# bind their host ports (Vega CNI block) and can't reach the streamstore.
-log "Phase 11: install eob-mutate webhook (port remapping)"
+# Runs as a systemd service on master-0 (not as a k8s Pod, to avoid the
+# chicken-and-egg of needing a pod that itself can't get networking). See
+# webhook/README.md for full mutation details + tunables.
+log "Phase 11: install eob-mutate webhook"
 if [[ -x "$BUNDLE_DIR/webhook/install.sh" ]]; then
   (cd "$BUNDLE_DIR/webhook" && ./install.sh) || log "  warning: eob-mutate install returned non-zero"
 else
   log "  webhook/install.sh not executable; skipped"
-fi
-
-log "Phase 11.5: install tawon-pod-injector webhook (hostNetwork + hostAliases injection)"
-TPI_DIR="${TPI_DIR:-${BUNDLE_DIR}/tawon-pod-injector}"
-if [[ -d "$TPI_DIR" ]]; then
-  log "  found $TPI_DIR — see its README for build + deploy commands"
-  log "  (this script does NOT invoke it automatically since it requires"
-  log "  podman build + cert gen + envsubst; do it once manually per site)"
-else
-  log "  $TPI_DIR not found — expected at \$BUNDLE_DIR/tawon-pod-injector."
-  log "  Without this, agent pods hit the Vega CNI block AND publish"
-  log "  'not connected' against stale operator hostAliases. See RUNBOOK.md."
 fi
 
 echo

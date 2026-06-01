@@ -129,41 +129,68 @@ kubectl -n tawon-operator delete pod tawon-streamstore-0 --grace-period=0 --forc
 
 ---
 
-## Phase 2 — eob-mutate webhook (port remap)
+## Phase 2 — eob-mutate webhook (one webhook, three concerns)
 
-This is the **existing Python webhook** in `webhook/`. It handles
-per-directive port remapping (agent probes/metrics) so concurrent
-ClusterDirectives don't collide on the same hostPort. It is NOT the
-same thing as `tawon-pod-injector` (Phase 4 below).
+The Python webhook in `webhook/` is the single admission-time mutation
+point for every Tawon-spawned pod. It does three things at once:
+
+1. **hostNetwork bypass** — sets `hostNetwork: true` +
+   `dnsPolicy: ClusterFirstWithHostNet` so the pod skips Vega CNI.
+2. **NATS DNS workaround** — adds a `hostAliases` entry mapping the
+   streamstore FQDN + the short name `nats` to a reachable IP.
+3. **Per-directive port remap** — gives each agent DaemonSet unique
+   probe + metrics hostPorts so multiple ClusterDirectives can coexist
+   on the same hostNetwork node.
+
+Runs as a **systemd service on master-0** (not as a k8s pod, to avoid
+the chicken-and-egg of needing a pod that itself can't get
+networking).
 
 ```bash
 cd ~/eob-xc-install/webhook
 ./install.sh
 ```
 
+The installer reads the streamstore Pod's hostIP at install time and
+bakes it into the webhook's `NATS_IP` env (`/etc/eob-mutate/env`).
+That value is the only piece of state that goes stale — see Phase 3
+for when + how to refresh it.
+
 **Gate:**
 
 ```bash
-kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration | grep eob-mutate
-# expect 1 MutatingWebhookConfiguration named eob-mutate
+kubectl get mutatingwebhookconfiguration eob-mutate
+sudo systemctl is-active eob-mutate.service
+# expect: 1 MutatingWebhookConfiguration named eob-mutate; service "active"
 ```
 
 ---
 
-## Phase 3 — Repair operator + dashboard hostAliases
+## Phase 3 — Refresh stale hostAliases IPs
 
-⚠️ **The IP that `install.sh` baked into operator + dashboard hostAliases
-(the streamstore Service ClusterIP) goes stale the moment the Service
-is recreated.** This is the largest single source of brittleness on
-this site. If you ever see the operator log
-`dial tcp <some-IP>:4222: i/o timeout` or the dashboard packet viewer
-error "load nats jetstream stream: create consumer: context deadline
-exceeded", this is what's wrong.
+Three places carry a cached IP for the streamstore endpoint:
 
-**Fix:** point hostAliases at the streamstore Pod's host IP (stable as
-long as the pod stays pinned to master-0 per patches/05), bypassing the
-Service entirely. Cross-node Service routing is also broken on this
-site, so the host-IP path is more reliable anyway.
+1. **Operator pod's `hostAliases`** (set by `install.sh`)
+2. **Dashboard pod's `hostAliases`** (set by `install.sh`)
+3. **eob-mutate's `NATS_IP` env** (set by `webhook/install.sh`, used to
+   stamp the same hostAliases entry into agent pods at admission)
+
+Latest install.sh + webhook/install.sh both use the streamstore **Pod's
+hostIP** (stable as long as the StatefulSet stays pinned to master-0
+per `patches/05-streamstore-sts-patch.yaml`), so a fresh install gets
+this right. But if anything restarts the streamstore on a different
+node OR a chart re-install creates a new Service, all three need to
+be refreshed.
+
+Symptoms when one of these is wrong:
+
+| What you see | Which IP is stale |
+|---|---|
+| Operator log: `dial tcp <ip>:4222: i/o timeout` | operator hostAliases |
+| Dashboard UI: "load nats jetstream stream: create consumer: context deadline exceeded" | dashboard hostAliases |
+| Agent pod log: `publish payload: not connected` | eob-mutate NATS_IP |
+
+**Fix all three at once:**
 
 ```bash
 STREAMSTORE_HOST=$(kubectl -n tawon-operator get pod tawon-streamstore-0 \
@@ -185,6 +212,10 @@ kubectl -n tawon-operator patch deploy tawon-dashboard --type=json \
                                    \"tawon-streamstore-d2f18e\",
                                    \"nats\"]}]}]"
 
+# Refresh eob-mutate's NATS_IP env (used for AGENT pod hostAliases stamp)
+sudo sed -i.bak "s|^NATS_IP=.*|NATS_IP=$STREAMSTORE_HOST|" /etc/eob-mutate/env
+sudo systemctl restart eob-mutate.service
+
 # Roll both deployments (scale 0/1 to clear hostPort collision)
 kubectl -n operators scale deploy tawon-operator-controller-manager --replicas=0
 kubectl -n tawon-operator scale deploy tawon-dashboard --replicas=0
@@ -200,56 +231,14 @@ sleep 30
 kubectl -n operators get pod -l app.kubernetes.io/name=tawon-operator \
   -o jsonpath='{.items[0].spec.hostAliases[0].ip}{"\n"}'
 # expect: <STREAMSTORE_HOST value>
+
+sudo systemctl status eob-mutate.service --no-pager | head -3
+# expect: active (running) since <very recently>
+
+# When new agent pods get admitted, eob-mutate should now stamp the
+# correct IP into their hostAliases — verify by re-applying any
+# ClusterDirective and checking one of its DS pods.
 ```
-
----
-
-## Phase 4 — `tawon-pod-injector` (admission webhook)
-
-This is the **new** Go webhook that injects `hostNetwork: true` and
-operator-stale hostAliases corrections onto Tawon-spawned pods at pod
-admission. Lives in a sibling repo (`mimetrix/tawon-pod-injector`).
-
-Why it's separate from Phase 2's `eob-mutate`: that one handles port
-remapping (a single operator concern); this one handles network mode
-+ DNS overrides (XC-CNI concerns). They could be merged but live
-separately today.
-
-```bash
-# 1. Build + push the image
-cd ~/tawon-pod-injector
-podman build -t 172.31.44.247:5000/mantisnet/tawon-pod-injector:dev .
-podman push --tls-verify=false 172.31.44.247:5000/mantisnet/tawon-pod-injector:dev
-
-# 2. Generate cert + render manifest
-./deploy/certs/gen.sh > /tmp/certs.env
-. /tmp/certs.env
-python3 -c "
-import os
-with open('deploy/k8s/manifest.template.yaml') as f: t = f.read()
-for v in ['TLS_CRT','TLS_KEY','CA_BUNDLE']:
-    t = t.replace('\${'+v+'}', os.environ[v])
-print(t)
-" > /tmp/tawon-pod-injector.yaml
-
-# 3. Apply
-kubectl apply -f /tmp/tawon-pod-injector.yaml
-```
-
-**Gate:**
-
-```bash
-kubectl -n tawon-operator get pod -l app.kubernetes.io/name=tawon-pod-injector
-# expect 1 pod 1/1 Running
-
-kubectl -n tawon-operator logs -l app.kubernetes.io/name=tawon-pod-injector
-# expect: "HTTPS listener starting" — no errors
-```
-
-⚠️ The webhook hardcodes `StreamStoreHostIP` in
-`internal/inject/inject.go`. If streamstore ever moves to a different
-master, this constant has to be updated and the image rebuilt. Phase 6
-(hardening) covers making this dynamic.
 
 ---
 
@@ -306,7 +295,7 @@ kubectl -n tawon-operator get ds tawon-directive-capture-coredns-udp53
 kubectl -n tawon-operator get pods -l app.kubernetes.io/name=tawon-directive
 # expect: 3 pods 1/1 Running
 # If Init:ErrImagePull → kernelHeaders.strategy wasn't "Host".
-# If ContainerCreating with Vega CNI error → Phase 4 (webhook) not working.
+# If ContainerCreating with Vega CNI error → Phase 2 (eob-mutate webhook) not firing.
 
 # 4. Stream messages accumulating
 kubectl -n tawon-operator get stream coredns-udp53
@@ -371,16 +360,20 @@ Phase 3.
 
 ### Agent pods CrashLoopBackOff with "publish payload: not connected"
 
-Agent pods need the same hostAliases the operator has. If you see this
-after Phase 4 (webhook is deployed), the webhook isn't catching agent
-admissions — check:
+Agent pods need a `hostAliases` entry stamped by eob-mutate that
+points at the current streamstore Pod hostIP. Symptoms means either
+the webhook isn't firing, OR it has the wrong cached IP. Check:
 
 ```bash
-kubectl -n tawon-operator get mutatingwebhookconfiguration tawon-pod-injector
-# expect 1 entry with matching namespaceSelector + objectSelector
+kubectl get mutatingwebhookconfiguration eob-mutate
+# expect 1 entry; verify the caBundle and clientConfig URL still point at master-0:9443
 
-kubectl -n tawon-operator logs -l app.kubernetes.io/name=tawon-pod-injector
-# expect "patched pod" entries for each admitted Tawon pod
+sudo journalctl -u eob-mutate.service --since "5 min ago" | tail -10
+# expect: "POST /mutate?timeout=5s HTTP/1.1" 200 lines for each new agent pod admitted
+
+sudo cat /etc/eob-mutate/env
+# expect: NATS_IP=<current streamstore Pod hostIP>
+# If this is stale → fix per Phase 3 (sed + systemctl restart eob-mutate)
 ```
 
 ### Dashboard "create consumer: context deadline exceeded"
@@ -414,13 +407,16 @@ kubectl -n tawon-operator get pod tawon-streamstore-0 \
   Phase 6 of the project roadmap is wrapping these steps in an
   installer that watches state and re-asserts invariants. Not done.
 
-- **TLS for eob-mcp + tawon-pod-injector in production.** Both
+- **TLS for eob-mcp + eob-mutate in production.** Both
   components support TLS (flag-gated for eob-mcp, mandatory for the
   webhook), but cert provisioning is left to the operator. cert-manager
   is the recommended path; this runbook doesn't cover its setup.
+  eob-mutate currently uses a self-signed cert generated by
+  `webhook/install.sh` with a 10y lifetime — fine for dev sites, swap
+  for cert-manager in any environment that does real cert rotation.
 
-- **Multi-site / fleet.** Each XC site runs an independent stack with
-  its own eob-mcp + tawon-pod-injector. The aggregator that fans out
+- **Multi-site / fleet.** Each XC site runs an independent stack
+  with its own eob-mcp + eob-mutate. The aggregator that fans out
   across sites is a separate project (see eob-mcp `docs/ARCHITECTURE.md`).
 
 - **Upstream fixes.** The brittleness this runbook works around comes

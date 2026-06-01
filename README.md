@@ -64,11 +64,29 @@ to understand before reading the procedure:
 
 ## Prerequisites
 
+> ⚠️ This README is the **conceptual reference** (the *why* of every
+> decision). The **step-by-step operational walkthrough** with
+> verification gates between phases lives in
+> [`RUNBOOK.md`](./RUNBOOK.md). If you're installing from scratch,
+> read RUNBOOK end-to-end first.
+
 On master-0:
 
 - SSH access as `xcuser` (key `~/.ssh/id_ed25519_xc`) — see memory `reference_xc_node_access`
 - `sudo` to root works for `xcuser`
 - `podman`, `helm`, `kubectl` on PATH
+
+Cluster-side gates (`install.sh` Phase 0 auto-asserts these, but you
+can pre-flight them manually too):
+
+- **Default StorageClass must be `hostpath`** — the `standard` SC
+  declares the in-tree aws-ebs provisioner that k8s 1.27+ removed, so
+  PVCs against it hang forever.
+- **Master nodes must carry `node-role.kubernetes.io/master`** — XC
+  nodes only have `kubernetes.io/role=ves-master` by default, and
+  Tawon's agent DS nodeAffinity requires the canonical label.
+- **`tawon-config` CM's `namespacedDirective.nodeRoles`** must include
+  `master` (default is `worker` only — XC sites have no workers).
 
 Off-cluster:
 
@@ -225,12 +243,17 @@ kubectl -n tawon-operator set image sts/tawon-streamstore \
   tawon-streamstore-d2f18e=quay.io/mantisnet/nats:2.10.4-alpine
 
 # DNS workaround for Stream→NATS: the operator hardcodes *.cluster.local in the
-# StreamReconciler. Wait for streamstore to come up so its Service has a ClusterIP,
-# then add a hostAliases entry on the operator pod mapping the hardcoded FQDN to the IP.
+# StreamReconciler. Wait for streamstore to come up, then add a hostAliases
+# entry on the operator pod mapping the hardcoded FQDN to a stable IP.
+#
+# Use the streamstore Pod's hostIP, NOT the Service ClusterIP. The ClusterIP
+# goes stale on chart re-install (operator hostAliases is never updated with the
+# new value), and cross-node Service routing is broken on XC sites anyway.
+# Since patches/05 pins the StatefulSet to master-0, the pod hostIP is stable.
 kubectl -n tawon-operator wait --for=condition=Ready pod tawon-streamstore-0 --timeout=120s
 
-NATS_IP=$(kubectl -n tawon-operator get svc tawon-streamstore-d2f18e -o jsonpath='{.spec.clusterIP}')
-echo "NATS ClusterIP: $NATS_IP"
+NATS_IP=$(kubectl -n tawon-operator get pod tawon-streamstore-0 -o jsonpath='{.status.hostIP}')
+echo "NATS endpoint (streamstore pod hostIP): $NATS_IP"
 
 kubectl -n operators patch deploy tawon-operator-controller-manager --type=strategic \
   -p "{\"spec\":{\"template\":{\"spec\":{
