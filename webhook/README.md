@@ -2,35 +2,47 @@
 
 ## What this is
 
-A small mutating admission webhook that takes a Tawon agent pod admission
-request and applies three mutations:
+A small mutating admission webhook that intercepts pod admission in the
+`tawon-operator` namespace and applies up to three mutations depending
+on which Tawon pod family is being admitted:
 
-1. **hostNetwork bypass:** `hostNetwork: true` + `dnsPolicy: ClusterFirstWithHostNet`,
-   so the pod skips Vega CNI. The Tawon operator generates the agent
-   DaemonSet without `hostNetwork` and reverts external `kubectl patch`
-   attempts that add it; admission-time mutation is the only place this
-   sticks.
-2. **NATS DNS workaround:** `hostAliases` entry mapping the streamstore
-   FQDN (the operator hardcodes `tawon-streamstore-d2f18e.tawon-operator.svc.cluster.local`,
-   regardless of the site's actual cluster DNS suffix) and the short name
-   `nats` to the streamstore Service ClusterIP. Without this the agent's
-   NATS client gets NXDOMAIN and the directive sits Ready=False.
-3. **Per-directive probe + metrics ports:** unique `containerPort` /
-   `hostPort` values for the named ports `http-probes` and `http-metrics`,
-   plus matching `TAWON_PROBES_ADDR` / `TAWON_METRICS_ADDR` env vars. Ports
-   are SHA1-derived from the agent DaemonSet name so the same directive
-   always gets the same ports across pod restarts. Without this, every
-   agent on every directive binds `:8081`/`:9990` and the second
-   ClusterDirective sits Pending with "no free ports for the requested
-   pod ports" on every node.
+1. **hostNetwork bypass** *(all three families: agent, dashboard, streamstore)*:
+   `hostNetwork: true` + `dnsPolicy: ClusterFirstWithHostNet`, so the pod
+   skips Vega CNI. The Tawon operator generates the agent DaemonSet
+   without `hostNetwork` and reverts external `kubectl patch` attempts
+   that add it; admission-time mutation is the only place this sticks.
+   The dashboard Deployment and streamstore StatefulSet also need
+   hostNetwork on XC sites for the same Vega-CNI-rejects-user-namespaces
+   reason.
+2. **NATS DNS workaround** *(all three families)*: `hostAliases` entry
+   mapping the streamstore FQDN (the operator hardcodes
+   `tawon-streamstore-<hex>.tawon-operator.svc.cluster.local`, regardless
+   of the site's actual cluster DNS suffix) and the short name `nats` to
+   the streamstore Pod's hostIP. The agent and dashboard both rely on
+   resolving that FQDN to JetStream; without this they fail with NXDOMAIN
+   or connect-timeout.
+3. **Per-directive probe + metrics ports** *(agent family only)*: unique
+   `containerPort` / `hostPort` values for the named ports `http-probes`
+   and `http-metrics`, plus matching `TAWON_PROBES_ADDR` /
+   `TAWON_METRICS_ADDR` env vars. Ports are SHA1-derived from the agent
+   DaemonSet name so the same directive always gets the same ports across
+   pod restarts. Without this, every agent on every directive binds
+   `:8081`/`:9990` and the second ClusterDirective sits Pending with
+   "no free ports for the requested pod ports" on every node.
 
 All three are workarounds for Mantis-side gaps; once upstream fixes land
-(hostNetwork knob on the agent DS, configurable probe/metrics addrs, env
-honored for the streamstore FQDN), the webhook can be retired entirely —
-see `../HOSTING.md` for the roadmap.
+(hostNetwork knob on the relevant CRDs, configurable probe/metrics addrs,
+env honored for the streamstore FQDN), the webhook can be retired
+entirely. See [`../UPSTREAM-FIXES.md`](../UPSTREAM-FIXES.md) for the
+specific items we're tracking with the Mantis team and
+[`../HOSTING.md`](../HOSTING.md) for the broader retirement roadmap.
 
-The webhook only matches pods with label `app.kubernetes.io/name=tawon-directive`
-in namespace `tawon-operator`. Nothing else is affected.
+The webhook gates by **pod name prefix** rather than label selector:
+mutations apply only to pods named `tawon-directive*`, `tawon-dashboard*`,
+or `tawon-streamstore*` in the `tawon-operator` namespace. Other pods in
+the same namespace (eob-mcp, debug pods, etc.) pass through admission
+unchanged. The name-prefix approach is robust to the chart-generated
+hex suffixes that label-based selectors can't match across reinstalls.
 
 ## How it's deployed
 

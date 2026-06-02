@@ -11,7 +11,10 @@ webhooks:
     sideEffects: None
     failurePolicy: Fail
     timeoutSeconds: 5
-    reinvocationPolicy: Never
+    # IfNeeded: if a later webhook in the chain mutates the spec we
+    # care about (hostNetwork, hostAliases, container ports), the
+    # apiserver re-invokes us so our patches stay coherent.
+    reinvocationPolicy: IfNeeded
     clientConfig:
       # URL form (not Service form) because the webhook server runs as a systemd
       # service on the master-0 host, not as a k8s pod.
@@ -23,9 +26,13 @@ webhooks:
         apiVersions: ["v1"]
         resources: ["pods"]
         scope: Namespaced
+    # Namespace gate only. There is no objectSelector — server.py
+    # decides per pod whether to mutate (name-prefix match against
+    # tawon-directive / tawon-dashboard / tawon-streamstore) and
+    # returns an empty patch for everything else. This covers the
+    # three pod families the chart renders with chart-generated label
+    # suffixes (e.g. tawon-streamstore-d2f18e) that an objectSelector
+    # cannot match across reinstalls.
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: tawon-operator
-    objectSelector:
-      matchLabels:
-        app.kubernetes.io/name: tawon-directive

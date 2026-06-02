@@ -63,6 +63,28 @@ KEYFILE = os.environ.get("KEYFILE", "/etc/eob-mutate/tls.key")
 
 AGENT_CONTAINER_NAME = "tawon-directive"
 
+# Pods this webhook will mutate. The MutatingWebhookConfiguration drops
+# its objectSelector to admit every pod in `tawon-operator`, so this set
+# is the actual gate. Membership rule: name (or generateName) starts
+# with one of these prefixes — covers the three Tawon-rendered pod
+# families (agent DaemonSet, dashboard Deployment, streamstore
+# StatefulSet) and stays oblivious to chart-generated hex suffixes.
+TAWON_MANAGED_NAME_PREFIXES = (
+    "tawon-directive",
+    "tawon-dashboard",
+    "tawon-streamstore",
+)
+
+
+def is_tawon_managed(pod):
+    """True if the admitted pod is one of the Tawon-rendered families
+    that need hostNetwork + hostAliases injection. False for unrelated
+    pods that happen to live in the same namespace (eob-mcp, debug pods,
+    etc.) — those pass through unmodified."""
+    meta = pod.get("metadata", {}) or {}
+    name = meta.get("name") or meta.get("generateName") or ""
+    return any(name.startswith(p) for p in TAWON_MANAGED_NAME_PREFIXES)
+
 
 def directive_identity(pod):
     """Stable per-directive identifier (DS name) from the admitted pod."""
@@ -83,7 +105,10 @@ def port_offset(name, mod):
 def make_patch(pod):
     """Return a JSONPatch (RFC 6902) list that toggles hostNetwork, points the
     hardcoded streamstore FQDN at the NATS ClusterIP, and assigns per-directive
-    probe/metrics ports."""
+    probe/metrics ports. Returns [] for any pod that is not a Tawon-managed
+    family — those pass through admission unchanged."""
+    if not is_tawon_managed(pod):
+        return []
     spec = pod.get("spec", {}) or {}
     patches = [
         {"op": "replace" if "hostNetwork" in spec else "add",
